@@ -64,13 +64,19 @@ function calculateData(){
     from=$1
     to=$2
     folder=$3
+    zip="${3//\//-}.zip"
     AIs=$4
     for i in `seq $from $to`; do
         result=$(timeout -k 360s 360s python3 ./scripts/dicewars-ai-only.py --ai $AIs 2>&1 > ${folder}/${i}.bin)
         if [[ $?  -eq 0 ]]; then
+            root=$(pwd)
             winner=$(echo $result | cut -d "'" -f2 | cut -d " " -f1)
             rate=$(echo $result | rev | cut -d "/" -f1 | rev)
             mv ${folder}/${i}.bin ${folder}/${i}_W-${winner}_R-${rate}.bin
+            cd ${folder}
+            zip $zip ${i}_W-${winner}_R-${rate}.bin > /dev/null
+            rm ${i}_W-${winner}_R-${rate}.bin
+            cd ${root}
             printf "%s\t%s\n"  "`date +"%T"`" "${i} - ${folder}"
         else
             printf "%s\tKILL\t%s\n"  "`date +"%T"`" "${i} - ${folder}"
