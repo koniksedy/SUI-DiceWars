@@ -12,29 +12,32 @@ import datetime
 import os
 import pickle
 import time
+from dicewars.ai.kb.move_selection import get_transfer_from_endangered, get_transfer_to_border
 from dicewars.ai.utils import possible_attacks, probability_of_holding_area, probability_of_successful_attack
-from dicewars.client.ai_driver import BattleCommand, EndTurnCommand
+from dicewars.client.ai_driver import BattleCommand, EndTurnCommand, TransferCommand
 from dicewars.client.game.area import Area
 from dicewars.client.game.board import Board
+from colorama import Fore, Style
+
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def define_parameters():
     params = dict()
     # Neural Network
-    cnt = 50
+    cnt = 20
     params['epsilon_decay_linear'] = 1/cnt
     params['learning_rate'] = 0.00013629
     params['first_layer_size'] = 200        # neurons in the first layer
     params['second_layer_size'] = 60        # neurons in the second layer
     params['third_layer_size'] = 30         # neurons in the third layer
     params['episodes'] = cnt   
-    params['memory_size'] = 400
-    params['batch_size'] = 200
+    params['memory_size'] = 2000
+    params['batch_size'] = 1500
     # Settings
     params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights.h5')
-    TrainAndNotLoat = False
-    params['train'] = TrainAndNotLoat
-    params['load_weights'] = not TrainAndNotLoat
+    TrainAndNotLoad = False
+    params['train'] = TrainAndNotLoad
+    params['load_weights'] = not TrainAndNotLoad
     params['log_path'] = 'logs/scores_' + str(datetime.datetime.now().strftime("%Y%m%d%H%M%S")) +'.txt'
     return params
 
@@ -62,6 +65,8 @@ class DQNSupaSoldierAI(torch.nn.Module):
         self.performed_attacks = 0
         self.fresh_init = True
         self.player_areas_old = 1
+        self.max_transfers = max_transfers
+        self.reserve_for_evacuation = 2 if 2 < max_transfers else 0
 
         self.bad_prediction = False
 
@@ -110,12 +115,18 @@ class DQNSupaSoldierAI(torch.nn.Module):
             model_weights = self.state_dict()
             torch.save(model_weights, self.params["weights_path"])
         if self.params['episodes'] == self.counter_games:
-            if self.params['train']:
-                print("Deleting state files...")
-                os.remove(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/SUPA_SOLDIER_STATE.pickle'))
+            print(f"{Fore.GREEN}Deleting state files... {Style.RESET_ALL}")
+            os.remove(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/SUPA_SOLDIER_STATE.pickle'))
             
 
     def ai_turn(self, board: Board, nb_moves_this_turn, nb_transfers_this_turn, nb_turns_this_game, time_left):
+
+        if nb_transfers_this_turn < self.max_transfers:
+            transfer = get_transfer_to_border(board, self.player_name)
+            if transfer:
+                return TransferCommand(transfer[0], transfer[1])
+
+
         self.optimizer = optim.Adam(self.parameters(), weight_decay=0, lr=self.params['learning_rate'])
         # self.optimizer = optim.SGD(self.parameters(), weight_decay=0, lr=self.params['learning_rate'])
 
@@ -141,6 +152,16 @@ class DQNSupaSoldierAI(torch.nn.Module):
         state_old, attacks = self.get_state(board)
         
         if len(attacks) == 0 or self.performed_attacks >= 10:
+            # # Evacuation
+            # if nb_transfers_this_turn < self.max_transfers:
+            #     transfer = get_transfer_from_endangered(board, self.player_name)
+            #     if transfer:
+            #         return TransferCommand(transfer[0], transfer[1])
+            #     else:
+            #         transfer = get_transfer_to_border(board, self.player_name)
+            #         if transfer:
+            #             return TransferCommand(transfer[0], transfer[1])
+
             self.performed_attacks = 0
             # print("Ending turn...")
             return EndTurnCommand()
@@ -309,7 +330,7 @@ class DQNSupaSoldierAI(torch.nn.Module):
         if self.bad_prediction:
             self.reward = -10
         elif num_of_areas < last_num_of_areas:
-            self.reward = -5
+            self.reward = -7
         elif num_of_areas > last_num_of_areas:
             self.reward = 10
 
