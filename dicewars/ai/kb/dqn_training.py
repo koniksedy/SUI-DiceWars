@@ -1,17 +1,14 @@
 import random
 import numpy as np
 import pandas as pd
-from operator import add
 import collections
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import copy
 import datetime
 import os
 import pickle
-import time
 from dicewars.ai.kb.move_selection import get_transfer_from_endangered, get_transfer_to_border
 from dicewars.ai.utils import possible_attacks, probability_of_holding_area, probability_of_successful_attack
 from dicewars.client.ai_driver import BattleCommand, EndTurnCommand, TransferCommand
@@ -34,14 +31,14 @@ def define_parameters():
     params['memory_size'] = 2000
     params['batch_size'] = 1500
     # Settings
-    params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights.h5')
+    params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights-final.h5')
     TrainAndNotLoad = True
     params['train'] = TrainAndNotLoad
     params['load_weights'] = not TrainAndNotLoad
     params['log_path'] = 'logs/scores_' + str(datetime.datetime.now().strftime("%Y%m%d%H%M%S")) +'.txt'
     return params
 
-class DQNSupaSoldierAI(torch.nn.Module):
+class AI(torch.nn.Module):
     def __init__(self, player_name, board, players_order, max_transfers):
         super().__init__()
         self.player_name = player_name
@@ -50,11 +47,8 @@ class DQNSupaSoldierAI(torch.nn.Module):
         self.gamma = 0.9
         self.dataframe = pd.DataFrame()
         self.short_memory = np.array([])
-        self.agent_target = 1
-        self.agent_predict = 0
         self.learning_rate = self.params['learning_rate']        
         self.epsilon = 1
-        self.actual = []
         self.first_layer = self.params['first_layer_size']
         self.second_layer = self.params['second_layer_size']
         self.third_layer = self.params['third_layer_size']
@@ -63,10 +57,11 @@ class DQNSupaSoldierAI(torch.nn.Module):
         self.load_weights = self.params['load_weights']
         self.counter_games = 0
         self.performed_attacks = 0
-        self.fresh_init = True
         self.player_areas_old = 1
         self.max_transfers = max_transfers
         self.reserve_for_evacuation = 2 if 2 < max_transfers else 0
+        
+        self.final_move_old = None
 
         self.bad_prediction = False
 
@@ -78,35 +73,22 @@ class DQNSupaSoldierAI(torch.nn.Module):
         self.loss_vals = []
         self.epoch_loss= []
 
-
         self.config = self.load_ai_state()
         self.network()
 
         if self.config:
-            print("Config loaded")
+            print("Loading state config from previous game")
             self.epsilon = self.config['epsilon']
             self.reward = self.config['reward']
             self.short_memory = self.config['short_memory']
             self.memory = self.config['memory']
             self.counter_games = self.config['counter_games']
-            self.load_weights = self.config['load_weights']
             self.player_areas_old = self.config['players_areas_old']
+            self.final_move_old = self.config['final_move_old']
             self.loss_vals = self.config['loss_vals']
-            print("Load weights: {}".format(self.load_weights))
         
-
-        print("Episodes: {}, Games total: {}".format(self.params['episodes'], self.counter_games))
-        
-        """
-        if len(self.loss_vals) == 8:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            print("Printing loss graph")
-            temp = list(range(0, len(self.loss_vals)))
-            plt.plot(np.linspace(1, temp, temp).astype(int), self.loss_vals)
-            plt.savefig('mygraph.png')
-        """ 
+        if self.params['train']:
+            print("Episodes: {}/{}".format(self.counter_games, self.params['episodes']))
 
     def __del__(self):
         self.save_ai_state()
@@ -114,81 +96,83 @@ class DQNSupaSoldierAI(torch.nn.Module):
         if self.params['train']:
             model_weights = self.state_dict()
             torch.save(model_weights, self.params["weights_path"])
+
         if self.params['episodes'] == self.counter_games:
             print(f"{Fore.GREEN}Deleting state files... {Style.RESET_ALL}")
-            os.remove(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/SUPA_SOLDIER_STATE.pickle'))
+            os.remove(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'))
             
 
     def ai_turn(self, board: Board, nb_moves_this_turn, nb_transfers_this_turn, nb_turns_this_game, time_left):
+        
+        self.epsilon = 0.00 if not self.params['train'] else 1 - (self.counter_games * self.params['epsilon_decay_linear'])
+        self.optimizer = optim.Adam(self.parameters(), weight_decay=0, lr=self.params['learning_rate'])
+        state_new, attacks = self.get_state(board)
 
-        if nb_transfers_this_turn < self.max_transfers:
+        #
+        #   Transfer commands
+        #
+        
+        # move dices to borders
+        if nb_transfers_this_turn + 2 < self.max_transfers:
             transfer = get_transfer_to_border(board, self.player_name)
             if transfer:
                 return TransferCommand(transfer[0], transfer[1])
 
-
-        self.optimizer = optim.Adam(self.parameters(), weight_decay=0, lr=self.params['learning_rate'])
-        # self.optimizer = optim.SGD(self.parameters(), weight_decay=0, lr=self.params['learning_rate'])
-
-        if self.fresh_init:
-            self.fresh_init = False
-            self.player_areas_old = board.get_player_areas(self.player_name)
-            if self.params['train'] and len(self.memory) > 0:
-                self.replay_new(self.memory, self.params['batch_size'])
-        
-
-
-        if not self.params['train']:
-            self.epsilon = 0.01
-        else:
-            self.epsilon = 1 - (self.counter_games * self.params['epsilon_decay_linear'])
-
-        # get results of previous round
-        state_new, attacks = self.get_state(board)
-
-        self.player_areas_current = board.get_player_areas(self.player_name)
-
-        # get old state + attacks
-        state_old, attacks = self.get_state(board)
-        
+        # Evacuation plan
         if len(attacks) == 0 or self.performed_attacks >= 10:
-            # # Evacuation
-            # if nb_transfers_this_turn < self.max_transfers:
-            #     transfer = get_transfer_from_endangered(board, self.player_name)
-            #     if transfer:
-            #         return TransferCommand(transfer[0], transfer[1])
-            #     else:
-            #         transfer = get_transfer_to_border(board, self.player_name)
-            #         if transfer:
-            #             return TransferCommand(transfer[0], transfer[1])
+            if nb_transfers_this_turn < self.max_transfers:
+                transfer = get_transfer_from_endangered(board, self.player_name)
+                if transfer:
+                    return TransferCommand(transfer[0], transfer[1])
+                else:
+                    transfer = get_transfer_to_border(board, self.player_name)
+                    if transfer:
+                        return TransferCommand(transfer[0], transfer[1])
 
             self.performed_attacks = 0
-            # print("Ending turn...")
             return EndTurnCommand()
+        
+        # retrain on entire memory if last epoch has ended (this is start of the new game)
+        if self.num_of_turns == 0 and self.params['train']:
+            self.player_areas_old = board.get_player_areas(self.player_name)
+            if len(self.memory) > 0:
+                self.replay_new(self.memory, self.params['batch_size'])
 
-        self.state_old = state_old
+        # get results of previous round and train network (if its not the first round)
+        if self.num_of_turns != 0 and self.params['train']:
+            self.player_areas_current = board.get_player_areas(self.player_name)
+            reward = self.set_reward(len(self.player_areas_current), len(self.player_areas_old))
+            
+            print("Are they the same? {}".format(self.state_old is state_new))
+            # train short memory base on the new action and state
+            self.train_short_memory(self.state_old, self.final_move_old, reward, state_new)
+            # store the new data into a long term memory
+            self.remember(self.state_old, self.final_move_old, reward, state_new)
+
+        # remember current state for next turn
+        self.state_old = state_new
         
         NN_predicted = False
         self.bad_prediction = False
-        # perform random actions based on agent.epsilon, or choose the action
-        # print("Epsilon: ", self.epsilon)
+        final_move_index = -1
         if random.uniform(0, 1) < self.epsilon:
-            final_move = np.eye(6)[random.randint(0, len(attacks) - 1 if len(attacks) - 1 <= 5 else 5)]
-            self.final_move = final_move
+            random_index = random.randint(0, len(attacks) - 1 if len(attacks) - 1 <= 5 else 5)
+            final_move = np.eye(6)[random_index]
+            self.final_move_old = final_move
+            final_move_index = random_index
         else:
             # predict action based on the old state
             with torch.no_grad():
                 NN_predicted = True
-                state_old_tensor = torch.tensor(state_old.reshape((1, 36)), dtype=torch.float32).to(DEVICE)
+                state_old_tensor = torch.tensor(state_new.reshape((1, 36)), dtype=torch.float32).to(DEVICE)
                 prediction = self(state_old_tensor)
-                # print("Attacks len: ", len(attacks))
-                # print("ASD", prediction.detach().cpu().numpy()[0])
-                # print("MAX", np.argmax(prediction.detach().cpu().numpy()[0]))
-                final_move = np.eye(6)[np.argmax(prediction.detach().cpu().numpy()[0])]
-                self.final_move = final_move
+                final_move_index = np.argmax(prediction.detach().cpu().numpy()[0])
+                final_move = np.eye(6)[final_move_index]
+                self.final_move_old = final_move
                 self.num_of_model_predictions += 1
+                
                 # print("NN Output: {}, attacks len: {}".format(prediction.detach().cpu().numpy()[0], len(attacks)))
-                if len(attacks) <= np.argmax(prediction.detach().cpu().numpy()[0]):
+                if len(attacks) <= final_move_index:
                     
                     max_prob = 0
                     max_prob_index = 0
@@ -199,58 +183,36 @@ class DQNSupaSoldierAI(torch.nn.Module):
                             max_prob_index = i
 
                     final_move = np.eye(6)[max_prob_index]
-                    self.final_move = final_move
+                    self.final_move_old = final_move
+                    final_move_index = max_prob_index
                     self.bad_prediction = True
                     self.num_of_bad_predictions += 1
                     
-        
-
-        # print("Setting reward and training short memory....")
-        # set reward for the new state
-        reward = self.set_reward(len(self.player_areas_current), len(self.player_areas_old))
-
-        print("ARE THEY THE SAME?: {}".format(self.state_old == state_new))
-
-        if self.params['train']:
-            # train short memory base on the new action and state
-            self.train_short_memory(self.state_old, self.final_move, reward, state_new)
-            # store the new data into a long term memory
-            self.remember(self.state_old, self.final_move, reward, state_new)
-
-
-        # perform new move and get new state
-        index = 0
-        for i, item in enumerate(final_move):
-            if item == 1:
-                index = i
-                break
-        
-        src_target = attacks[index]
-        # print("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", index, len(attacks)))
+        src_target = attacks[final_move_index]
+        print("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", final_move_index, len(attacks)))
         self.player_areas_old = board.get_player_areas(self.player_name)
         self.num_of_turns += 1
         self.performed_attacks += 1
         return BattleCommand(src_target[0].get_name(), src_target[1].get_name())  
     
     def save_ai_state(self):
-        print("Saving current model state...")
-        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/SUPA_SOLDIER_STATE.pickle'), 'wb') as config_dictionary_file:
-            self.counter_games += 1
+        print("AI is being destroyed, saving current model state...")
+        self.counter_games += 1
+        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'wb') as config_dictionary_file:
             state = {
-                "epsilon": 1 - (self.counter_games * self.params['epsilon_decay_linear']),
+                "epsilon": self.epsilon,
                 "reward": self.reward,
                 "short_memory": self.short_memory,
                 "memory": self.memory,
                 "counter_games": self.counter_games,
-                "load_weights": self.load_weights,
                 "players_areas_old": self.player_areas_old,
+                "final_move_old": self.final_move_old,
                 "loss_vals": self.loss_vals
             }
-            print("Saving state, weights: {}".format(self.load_weights))
             pickle.dump(state, config_dictionary_file)
 
     def load_ai_state(self):
-        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/SUPA_SOLDIER_STATE.pickle'), 'rb') as config_dictionary_file:
+        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'rb') as config_dictionary_file:
             config_dictionary = pickle.load(config_dictionary_file)
             return config_dictionary if config_dictionary else None
 
@@ -260,11 +222,11 @@ class DQNSupaSoldierAI(torch.nn.Module):
         self.f2 = nn.Linear(self.first_layer, self.second_layer)
         self.f3 = nn.Linear(self.second_layer, self.third_layer)
         self.f4 = nn.Linear(self.third_layer, 6)
+
         # weights
         if self.load_weights:
-            self.load_weights = False
             self.model = self.load_state_dict(torch.load(self.weights))
-            print("weights loaded, now its {}".format(self.load_weights))
+            print("Weights were loaded")
 
     def forward(self, x):
         x = F.relu(self.f1(x))
@@ -305,16 +267,6 @@ class DQNSupaSoldierAI(torch.nn.Module):
                 state.append(src.get_dice())
                 state.append(dst.get_dice())
                 
-
-                # print("""
-                # Training dato:
-                # ({})   Src dice:       {},
-                # ({})   Target dice:    {},
-                #        Enemies around: {},
-                #        Success prob.:  {},
-                #        Hodl prob.   :  {}
-                #  """.format(src.get_name(), src.get_dice(), dst.get_name(), dst.get_dice(), num_of_enemies_around, prob_of_success, prob_of_hodl))
-
         for i in range(len(state), 36, 6):
             state.append(0.00)
             state.append(1.00)
@@ -322,7 +274,6 @@ class DQNSupaSoldierAI(torch.nn.Module):
             state.append(8)
             state.append(2)
             state.append(8)
-
 
         return np.asarray(state), attacks_sorted
 
