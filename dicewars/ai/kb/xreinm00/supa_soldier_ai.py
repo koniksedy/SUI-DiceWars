@@ -24,7 +24,7 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 def define_parameters():
     params = dict()
     # Neural Network
-    cnt = 20
+    cnt = 30
     params['epsilon_decay_linear'] = 1/cnt
     params['learning_rate'] = 0.00013629
     params['first_layer_size'] = 200        # neurons in the first layer
@@ -224,7 +224,7 @@ class DQNSupaSoldierAI(torch.nn.Module):
                 break
         
         src_target = attacks[index]
-        # print("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} {}".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else ""))
+        # print("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", index, len(attacks)))
         self.player_areas_old = board.get_player_areas(self.player_name)
         self.num_of_turns += 1
         self.performed_attacks += 1
@@ -273,7 +273,7 @@ class DQNSupaSoldierAI(torch.nn.Module):
     
     def get_state(self, board: Board):
         state = []
-        attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() > a[1].get_dice()]
+        attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() >= a[1].get_dice()]
         attacks_sorted = sorted(attacks, key=lambda x: probability_of_successful_attack(board, x[0].get_name(), x[1].get_name()), reverse=True)
         if attacks:
             for i, attack in enumerate(attacks_sorted): 
