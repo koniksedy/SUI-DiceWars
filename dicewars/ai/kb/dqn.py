@@ -54,7 +54,7 @@ class AI(torch.nn.Module):
             if transfer:
                 return TransferCommand(transfer[0], transfer[1])
 
-        state, attacks = self.get_state(board)
+        state, attacks = self.get_state(board, nb_moves_this_turn)
         
         # Evacuation plan
         if len(attacks) == 0 or self.performed_attacks >= 10:
@@ -72,7 +72,7 @@ class AI(torch.nn.Module):
 
         self.bad_prediction = False
         with torch.no_grad():
-            state_tensor = torch.tensor(state.reshape((1, 36)), dtype=torch.float32).to(DEVICE)
+            state_tensor = torch.tensor(state.reshape((1, 42)), dtype=torch.float32).to(DEVICE)
             prediction = self(state_tensor)
             final_move = np.argmax(prediction.detach().cpu().numpy()[0])
             self.num_of_model_predictions += 1
@@ -99,9 +99,9 @@ class AI(torch.nn.Module):
         dprint("[NN] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format(src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", final_move, len(attacks)))
         return BattleCommand(src_target[0].get_name(), src_target[1].get_name())  
     
-    def get_state(self, board: Board):
+    def get_state(self, board: Board, moves_this_turn):
         state = []
-        attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() >= a[1].get_dice()]
+        attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() > (a[1].get_dice() - (0 if moves_this_turn else 1))]
         attacks_sorted = sorted(attacks, key=lambda x: probability_of_successful_attack(board, x[0].get_name(), x[1].get_name()), reverse=True)
         if attacks:
             for i, attack in enumerate(attacks_sorted): 
@@ -113,11 +113,13 @@ class AI(torch.nn.Module):
                 areas_around: list[int] = src.get_adjacent_areas_names()
                 
                 max_dice_around_target = 0
+                sum_dice_around_target = 0
                 for area_name in dst.get_adjacent_areas_names():
                     target_area: Area = board.get_area(area_name)
                     if target_area.get_owner_name() != self.player_name:
                         if max_dice_around_target < target_area.get_dice():
                             max_dice_around_target = target_area.get_dice()
+                            sum_dice_around_target += target_area.get_dice()
 
                 num_of_enemies_around = 0
                 for area in areas_around:
@@ -128,6 +130,7 @@ class AI(torch.nn.Module):
                 state.append(prob_of_hodl)
                 state.append(num_of_enemies_around)
                 state.append(max_dice_around_target)
+                state.append(sum_dice_around_target)
                 state.append(src.get_dice())
                 state.append(dst.get_dice())
                 
@@ -142,11 +145,12 @@ class AI(torch.nn.Module):
                 #  """.format(src.get_name(), src.get_dice(), dst.get_name(), dst.get_dice(), num_of_enemies_around, prob_of_success, prob_of_hodl))
 
         # fill the rest of the state vector with extreme values -> they shouldn't be selected by model ever
-        for i in range(len(state), 36, 6):
+        for i in range(len(state), 42, 7):
             state.append(0.00)
             state.append(1.00)
             state.append(1)
             state.append(8)
+            state.append(45)
             state.append(2)
             state.append(8)
 
@@ -161,7 +165,7 @@ class AI(torch.nn.Module):
 
     def set_network(self):
         # Layers
-        self.f1 = nn.Linear(36, self.first_layer)
+        self.f1 = nn.Linear(42, self.first_layer)
         self.f2 = nn.Linear(self.first_layer, self.second_layer)
         self.f3 = nn.Linear(self.second_layer, self.third_layer)
         self.f4 = nn.Linear(self.third_layer, 6)

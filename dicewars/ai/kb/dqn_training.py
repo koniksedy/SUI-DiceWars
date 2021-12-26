@@ -28,8 +28,8 @@ def define_parameters():
     params['second_layer_size'] = 60        # neurons in the second layer
     params['third_layer_size'] = 30         # neurons in the third layer
     params['episodes'] = cnt   
-    params['memory_size'] = 2000
-    params['batch_size'] = 1500
+    params['memory_size'] = 400
+    params['batch_size'] = 200
     # Settings
     params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights-final.h5')
     TrainAndNotLoad = True
@@ -106,18 +106,19 @@ class AI(torch.nn.Module):
         
         self.epsilon = 0.00 if not self.params['train'] else 1 - (self.counter_games * self.params['epsilon_decay_linear'])
         self.optimizer = optim.Adam(self.parameters(), weight_decay=0, lr=self.params['learning_rate'])
-        state_new, attacks = self.get_state(board)
+        state_new, attacks = self.get_state(board, nb_moves_this_turn)
 
         #
         #   Transfer commands
         #
-        
+
         # move dices to borders
-        if nb_transfers_this_turn + 2 < self.max_transfers:
+        if nb_transfers_this_turn < self.max_transfers:
             transfer = get_transfer_to_border(board, self.player_name)
             if transfer:
                 return TransferCommand(transfer[0], transfer[1])
 
+        """
         # Evacuation plan
         if len(attacks) == 0 or self.performed_attacks >= 10:
             if nb_transfers_this_turn < self.max_transfers:
@@ -131,7 +132,12 @@ class AI(torch.nn.Module):
 
             self.performed_attacks = 0
             return EndTurnCommand()
+
+        """
+        if len(attacks) == 0:
+            return EndTurnCommand()
         
+
         # retrain on entire memory if last epoch has ended (this is start of the new game)
         if self.num_of_turns == 0 and self.params['train']:
             self.player_areas_old = board.get_player_areas(self.player_name)
@@ -143,7 +149,6 @@ class AI(torch.nn.Module):
             self.player_areas_current = board.get_player_areas(self.player_name)
             reward = self.set_reward(len(self.player_areas_current), len(self.player_areas_old))
             
-            print("Are they the same? {}".format(self.state_old is state_new))
             # train short memory base on the new action and state
             self.train_short_memory(self.state_old, self.final_move_old, reward, state_new)
             # store the new data into a long term memory
@@ -164,7 +169,7 @@ class AI(torch.nn.Module):
             # predict action based on the old state
             with torch.no_grad():
                 NN_predicted = True
-                state_old_tensor = torch.tensor(state_new.reshape((1, 36)), dtype=torch.float32).to(DEVICE)
+                state_old_tensor = torch.tensor(state_new.reshape((1, 42)), dtype=torch.float32).to(DEVICE)
                 prediction = self(state_old_tensor)
                 final_move_index = np.argmax(prediction.detach().cpu().numpy()[0])
                 final_move = np.eye(6)[final_move_index]
@@ -218,7 +223,7 @@ class AI(torch.nn.Module):
 
     def network(self):
         # Layers
-        self.f1 = nn.Linear(36, self.first_layer)
+        self.f1 = nn.Linear(42, self.first_layer)
         self.f2 = nn.Linear(self.first_layer, self.second_layer)
         self.f3 = nn.Linear(self.second_layer, self.third_layer)
         self.f4 = nn.Linear(self.third_layer, 6)
@@ -235,9 +240,9 @@ class AI(torch.nn.Module):
         x = F.softmax(self.f4(x), dim=-1)
         return x
     
-    def get_state(self, board: Board):
+    def get_state(self, board: Board, moves_this_turn):
         state = []
-        attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() >= a[1].get_dice()]
+        attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() > (a[1].get_dice() - (0 if moves_this_turn else 1))]
         attacks_sorted = sorted(attacks, key=lambda x: probability_of_successful_attack(board, x[0].get_name(), x[1].get_name()), reverse=True)
         if attacks:
             for i, attack in enumerate(attacks_sorted): 
@@ -249,11 +254,13 @@ class AI(torch.nn.Module):
                 areas_around: list[int] = src.get_adjacent_areas_names()
                 
                 max_dice_around_target = 0
+                sum_dice_around_target = 0
                 for area_name in dst.get_adjacent_areas_names():
                     target_area: Area = board.get_area(area_name)
                     if target_area.get_owner_name() != self.player_name:
                         if max_dice_around_target < target_area.get_dice():
                             max_dice_around_target = target_area.get_dice()
+                            sum_dice_around_target += target_area.get_dice()
 
                 num_of_enemies_around = 0
                 for area in areas_around:
@@ -264,14 +271,16 @@ class AI(torch.nn.Module):
                 state.append(prob_of_hodl)
                 state.append(num_of_enemies_around)
                 state.append(max_dice_around_target)
+                state.append(sum_dice_around_target)
                 state.append(src.get_dice())
                 state.append(dst.get_dice())
                 
-        for i in range(len(state), 36, 6):
+        for i in range(len(state), 42, 7):
             state.append(0.00)
             state.append(1.00)
             state.append(1)
             state.append(8)
+            state.append(45)
             state.append(2)
             state.append(8)
 
@@ -283,7 +292,7 @@ class AI(torch.nn.Module):
         if self.bad_prediction:
             self.reward = -10
         elif num_of_areas < last_num_of_areas:
-            self.reward = -7
+            self.reward = -5
         elif num_of_areas > last_num_of_areas:
             self.reward = 10
 
@@ -337,8 +346,8 @@ class AI(torch.nn.Module):
         self.train()
         torch.set_grad_enabled(True)
         target = reward
-        next_state_tensor = torch.tensor(next_state.reshape((1, 36)), dtype=torch.float32).to(DEVICE)
-        state_tensor = torch.tensor(state.reshape((1, 36)), dtype=torch.float32, requires_grad=True).to(DEVICE)
+        next_state_tensor = torch.tensor(next_state.reshape((1, 42)), dtype=torch.float32).to(DEVICE)
+        state_tensor = torch.tensor(state.reshape((1, 42)), dtype=torch.float32, requires_grad=True).to(DEVICE)
         target = reward + self.gamma * torch.max(self.forward(next_state_tensor[0]))
         output = self.forward(state_tensor)
         target_f = output.clone()
