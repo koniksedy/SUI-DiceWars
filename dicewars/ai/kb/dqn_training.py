@@ -118,7 +118,6 @@ class AI(torch.nn.Module):
             if transfer:
                 return TransferCommand(transfer[0], transfer[1])
 
-        """
         # Evacuation plan
         if len(attacks) == 0 or self.performed_attacks >= 10:
             if nb_transfers_this_turn < self.max_transfers:
@@ -132,11 +131,6 @@ class AI(torch.nn.Module):
 
             self.performed_attacks = 0
             return EndTurnCommand()
-
-        """
-        if len(attacks) == 0:
-            return EndTurnCommand()
-        
 
         # retrain on entire memory if last epoch has ended (this is start of the new game)
         if self.num_of_turns == 0 and self.params['train']:
