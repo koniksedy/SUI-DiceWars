@@ -9,6 +9,7 @@ import torch.optim as optim
 import datetime
 import os
 import pickle
+import json
 from dicewars.ai.kb.move_selection import get_transfer_from_endangered, get_transfer_to_border
 from dicewars.ai.utils import possible_attacks, probability_of_holding_area, probability_of_successful_attack
 from dicewars.client.ai_driver import BattleCommand, EndTurnCommand, TransferCommand
@@ -21,15 +22,16 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 def define_parameters():
     params = dict()
     # Neural Network
-    cnt = 30
+    cnt = 100
     params['epsilon_decay_linear'] = 1/cnt
-    params['learning_rate'] = 0.00013629
+    # params['learning_rate'] = 0.00013629
+    params['learning_rate'] = 0.003
     params['first_layer_size'] = 200        # neurons in the first layer
     params['second_layer_size'] = 60        # neurons in the second layer
     params['third_layer_size'] = 30         # neurons in the third layer
     params['episodes'] = cnt   
-    params['memory_size'] = 400
-    params['batch_size'] = 200
+    params['memory_size'] = 2000
+    params['batch_size'] = 300
     # Settings
     params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights-final.h5')
     TrainAndNotLoad = True
@@ -41,6 +43,7 @@ def define_parameters():
 class AI(torch.nn.Module):
     def __init__(self, player_name, board, players_order, max_transfers):
         super().__init__()
+        print("New AI object was created...")
         self.player_name = player_name
         self.params = define_parameters()
         self.reward = 0
@@ -62,9 +65,11 @@ class AI(torch.nn.Module):
         self.reserve_for_evacuation = 2 if 2 < max_transfers else 0
         
         self.final_move_old = None
+        self.final_moves_cache = []
 
         self.bad_prediction = False
 
+        self.fresh_start = True
         self.num_of_turns = 0
         self.num_of_model_predictions = 0
         self.num_of_bad_predictions = 0
@@ -73,25 +78,29 @@ class AI(torch.nn.Module):
         self.loss_vals = []
         self.epoch_loss= []
 
-        self.config = self.load_ai_state()
+        self.config, self.memory_snap = self.load_ai_state()
         self.network()
 
         if self.config:
             print("Loading state config from previous game")
             self.epsilon = self.config['epsilon']
-            self.reward = self.config['reward']
-            self.short_memory = self.config['short_memory']
-            self.memory = self.config['memory']
             self.counter_games = self.config['counter_games']
-            self.player_areas_old = self.config['players_areas_old']
-            self.final_move_old = self.config['final_move_old']
             self.loss_vals = self.config['loss_vals']
+            
+            print(f"""
+                    Previous state loaded, new values:
+                    Epsilon: {self.epsilon},
+                    Game counter: {self.counter_games}
+                    """)
+        
+        if self.memory_snap:
+            print("Loading memory from previous game")
+            self.memory = self.memory_snap
         
         if self.params['train']:
             print("Episodes: {}/{}".format(self.counter_games, self.params['episodes']))
 
     def __del__(self):
-        self.save_ai_state()
         print("Total turns: {}, Model made {} predictions, {} of them were bad.".format(self.num_of_turns, self.num_of_model_predictions, self.num_of_bad_predictions))
         if self.params['train']:
             model_weights = self.state_dict()
@@ -104,7 +113,7 @@ class AI(torch.nn.Module):
 
     def ai_turn(self, board: Board, nb_moves_this_turn, nb_transfers_this_turn, nb_turns_this_game, time_left):
         
-        self.epsilon = 0.00 if not self.params['train'] else 1 - (self.counter_games * self.params['epsilon_decay_linear'])
+        self.epsilon = 0.05 if not self.params['train'] else 1 - (self.counter_games * self.params['epsilon_decay_linear'])
         self.optimizer = optim.Adam(self.parameters(), weight_decay=0, lr=self.params['learning_rate'])
         state_new, attacks = self.get_state(board, nb_moves_this_turn)
 
@@ -130,21 +139,25 @@ class AI(torch.nn.Module):
                         return TransferCommand(transfer[0], transfer[1])
 
             self.performed_attacks = 0
+            self.save_ai_state()
+            print(f"Predicted indexes: {self.final_moves_cache}")
+            self.final_moves_cache.clear()
             return EndTurnCommand()
 
         # retrain on entire memory if last epoch has ended (this is start of the new game)
         if self.num_of_turns == 0 and self.params['train']:
-            self.player_areas_old = board.get_player_areas(self.player_name)
+            self.player_areas_old = len(board.get_player_areas(self.player_name))
             if len(self.memory) > 0:
                 self.replay_new(self.memory, self.params['batch_size'])
 
         # get results of previous round and train network (if its not the first round)
         if self.num_of_turns != 0 and self.params['train']:
-            self.player_areas_current = board.get_player_areas(self.player_name)
-            reward = self.set_reward(len(self.player_areas_current), len(self.player_areas_old))
+            self.player_areas_current = len(board.get_player_areas(self.player_name))
+            reward = self.set_reward(self.player_areas_current, self.player_areas_old)
+            print(f"({self.player_areas_old}) --> ({self.player_areas_current})  =  {reward}")
             
             # train short memory base on the new action and state
-            self.train_short_memory(self.state_old, self.final_move_old, reward, state_new)
+            # self.train_short_memory(self.state_old, self.final_move_old, reward, state_new)
             # store the new data into a long term memory
             self.remember(self.state_old, self.final_move_old, reward, state_new)
 
@@ -169,6 +182,7 @@ class AI(torch.nn.Module):
                 final_move = np.eye(6)[final_move_index]
                 self.final_move_old = final_move
                 self.num_of_model_predictions += 1
+                self.final_moves_cache.append(final_move_index)
                 
                 # print("NN Output: {}, attacks len: {}".format(prediction.detach().cpu().numpy()[0], len(attacks)))
                 if len(attacks) <= final_move_index:
@@ -186,34 +200,57 @@ class AI(torch.nn.Module):
                     final_move_index = max_prob_index
                     self.bad_prediction = True
                     self.num_of_bad_predictions += 1
+
+                
+
                     
         src_target = attacks[final_move_index]
-        print("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", final_move_index, len(attacks)))
-        self.player_areas_old = board.get_player_areas(self.player_name)
+        # print("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", final_move_index, len(attacks)))
+        self.player_areas_old = len(board.get_player_areas(self.player_name))
         self.num_of_turns += 1
         self.performed_attacks += 1
         return BattleCommand(src_target[0].get_name(), src_target[1].get_name())  
     
     def save_ai_state(self):
-        print("AI is being destroyed, saving current model state...")
-        self.counter_games += 1
+        
+        # print(f"Saving state, mem len {len(self.memory)}")
+        # print("AI is being destroyed, saving current model state...")
+        if self.fresh_start:
+            self.fresh_start = False
+            self.counter_games += 1
+       
+       # Pickle
         with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'wb') as config_dictionary_file:
             state = {
                 "epsilon": self.epsilon,
-                "reward": self.reward,
-                "short_memory": self.short_memory,
-                "memory": self.memory,
                 "counter_games": self.counter_games,
-                "players_areas_old": self.player_areas_old,
-                "final_move_old": self.final_move_old,
                 "loss_vals": self.loss_vals
             }
             pickle.dump(state, config_dictionary_file)
 
+        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle'), 'wb') as memory_file:
+            try:
+                pickle.dump(self.memory, memory_file)
+            except Exception as e:
+                print(" --- Saving memory error --- ")
+                print(e)
+
+
     def load_ai_state(self):
-        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'rb') as config_dictionary_file:
-            config_dictionary = pickle.load(config_dictionary_file)
-            return config_dictionary if config_dictionary else None
+        config = None
+        memory = None
+        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle')):
+            with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'rb') as config_dictionary_file:
+                print("reading config")
+                config = pickle.load(config_dictionary_file)
+
+        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle')):
+            with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle'), 'rb') as memory_file:
+                try:
+                    memory = pickle.load(memory_file)
+                except Exception as e:
+                    print("Memory corrupt")
+        return config, memory
 
     def network(self):
         # Layers
@@ -261,22 +298,22 @@ class AI(torch.nn.Module):
                     if board.get_area(area).get_owner_name() != self.player_name: 
                         num_of_enemies_around += 1
                 
-                state.append(prob_of_success)
-                state.append(prob_of_hodl)
-                state.append(num_of_enemies_around)
-                state.append(max_dice_around_target)
-                state.append(sum_dice_around_target)
-                state.append(src.get_dice())
-                state.append(dst.get_dice())
+                state.append(float(prob_of_success))
+                state.append(float(prob_of_hodl))
+                state.append(float(num_of_enemies_around))
+                state.append(float(max_dice_around_target))
+                state.append(float(sum_dice_around_target))
+                state.append(float(src.get_dice()))
+                state.append(float(dst.get_dice()))
                 
         for i in range(len(state), 42, 7):
             state.append(0.00)
             state.append(1.00)
-            state.append(1)
-            state.append(8)
-            state.append(45)
-            state.append(2)
-            state.append(8)
+            state.append(1.00)
+            state.append(8.00)
+            state.append(45.00)
+            state.append(2.00)
+            state.append(8.00)
 
         return np.asarray(state), attacks_sorted
 
@@ -305,6 +342,11 @@ class AI(torch.nn.Module):
         """
         Replay memory.
         """
+        
+        # if mem len is lesser than batch_size, there is no point in learning
+        if batch_size > len(memory):
+            return
+
         print("Starting replaying memory, mem len: {}".format(len(memory)))
         if len(memory) > batch_size:
             minibatch = random.sample(memory, batch_size)
@@ -314,19 +356,35 @@ class AI(torch.nn.Module):
         for state, action, reward, next_state in minibatch:
             self.train()
             torch.set_grad_enabled(True)
-            target = reward
-            next_state_tensor = torch.tensor(np.expand_dims(next_state, 0), dtype=torch.float32).to(DEVICE)
+            self.optimizer.zero_grad()
+            # target = reward
+
             state_tensor = torch.tensor(np.expand_dims(state, 0), dtype=torch.float32, requires_grad=True).to(DEVICE)
-            target = reward + self.gamma * torch.max(self.forward(next_state_tensor)[0])
-            output = self.forward(state_tensor)
-            target_f = output.clone()
-            target_f[0][np.argmax(action)] = target
+            next_state_tensor = torch.tensor(np.expand_dims(next_state, 0), dtype=torch.float32).to(DEVICE)
+            
+            q_eval = self.forward(state_tensor)
+            # q_eval = self.forward(state_tensor)[0][np.argmax(action)]
+            q_next = self.forward(next_state_tensor)
+            q_target = reward + self.gamma * torch.max(q_next[0])
+
+        
+            """
+            loss = F.mse_loss(q_eval, q_target).to(DEVICE)
+            loss.backward()
+            self.optimizer.step()
+            self.epoch_loss.append(loss.item())
+            """
+
+            target_f = q_eval.clone()
+            target_f[0][np.argmax(action)] = q_target
             target_f.detach()
             self.optimizer.zero_grad()
-            loss = F.mse_loss(output, target_f)
+            loss = F.mse_loss(q_eval, target_f)
             loss.backward()
             self.epoch_loss.append(loss.item())
             self.optimizer.step()    
+
+
 
         self.loss_vals.append(sum(self.epoch_loss)/len(self.epoch_loss))
         print("Loss value {}".format(self.loss_vals[-1]))
