@@ -9,6 +9,7 @@ from dicewars.ai.utils import possible_attacks, probability_of_holding_area, pro
 from dicewars.client.ai_driver import BattleCommand, EndTurnCommand, TransferCommand
 from dicewars.client.game.area import Area
 from dicewars.client.game.board import Board
+import random
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 DEBUG = True
@@ -25,6 +26,7 @@ class AI(torch.nn.Module):
     def __init__(self, player_name, board, players_order, max_transfers):
         super().__init__()
         self.player_name = player_name
+        self.players_order = players_order
         self.weights_path = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights-final.h5')
         self.gamma = 0.9      
         self.epsilon = 0
@@ -47,10 +49,11 @@ class AI(torch.nn.Module):
         dprint("Total turns: {}, Model made {} predictions, {} of them were bad.".format(self.num_of_turns, self.num_of_model_predictions, self.num_of_bad_predictions))
 
     def ai_turn(self, board: Board, nb_moves_this_turn, nb_transfers_this_turn, nb_turns_this_game, time_left):
-        
+        dprint(f"Time left: {time_left}")
         # move dices to borders
         if nb_transfers_this_turn + 2 < self.max_transfers:
-            transfer = get_transfer_to_border(board, self.player_name)
+            # transfer = get_transfer_to_border(board, self.player_name)
+            transfer = self.get_transfer_to_border_custom(board, self.player_name, 4)
             if transfer:
                 return TransferCommand(transfer[0], transfer[1])
 
@@ -63,7 +66,8 @@ class AI(torch.nn.Module):
                 if transfer:
                     return TransferCommand(transfer[0], transfer[1])
                 else:
-                    transfer = get_transfer_to_border(board, self.player_name)
+                    # transfer = get_transfer_to_border(board, self.player_name)
+                    transfer = self.get_transfer_to_border_custom(board, self.player_name, 2)
                     if transfer:
                         return TransferCommand(transfer[0], transfer[1])
 
@@ -72,11 +76,11 @@ class AI(torch.nn.Module):
 
         self.bad_prediction = False
         with torch.no_grad():
-            state_tensor = torch.tensor(state.reshape((1, 42)), dtype=torch.float32).to(DEVICE)
+            state_tensor = torch.tensor(state.reshape((1, 44)), dtype=torch.float32).to(DEVICE)
             prediction = self(state_tensor)
             final_move = np.argmax(prediction.detach().cpu().numpy()[0])
             self.num_of_model_predictions += 1
-
+            # print("NN Output: {}, attacks len: {}".format(prediction.detach().cpu().numpy()[0], len(attacks)))
             # if classifier precited move out of max index, it needs to be corrected manually
             # this shouldn't happen at any time
             if len(attacks) <= np.argmax(prediction.detach().cpu().numpy()[0]):
@@ -96,11 +100,31 @@ class AI(torch.nn.Module):
         self.num_of_turns += 1
         self.performed_attacks += 1
 
-        dprint("[NN] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format(src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", final_move, len(attacks)))
+        # dprint("[NN] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format(src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", final_move, len(attacks)))
         return BattleCommand(src_target[0].get_name(), src_target[1].get_name())  
     
     def get_state(self, board: Board, moves_this_turn):
         state = []
+        area_dices = []
+
+        enemy_areas = []
+        for player_name in self.players_order:
+            if player_name != self.player_name:
+                enemy_areas.extend(board.get_player_areas(player_name))
+
+        my_areas = board.get_player_areas(self.player_name)
+
+        my_areas_ratio = len(my_areas) / (len(enemy_areas) + len(my_areas))
+
+        for area in my_areas:
+            area_dices.append(area.get_dice())
+        
+        area_dices = np.array(area_dices)
+        areas_dices_mean = area_dices.mean()
+
+        state.append(my_areas_ratio)
+        state.append(areas_dices_mean)
+        
         attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() > (a[1].get_dice() - (0 if moves_this_turn else 1))]
         attacks_sorted = sorted(attacks, key=lambda x: probability_of_successful_attack(board, x[0].get_name(), x[1].get_name()), reverse=True)
         if attacks:
@@ -145,7 +169,7 @@ class AI(torch.nn.Module):
                 #  """.format(src.get_name(), src.get_dice(), dst.get_name(), dst.get_dice(), num_of_enemies_around, prob_of_success, prob_of_hodl))
 
         # fill the rest of the state vector with extreme values -> they shouldn't be selected by model ever
-        for i in range(len(state), 42, 7):
+        for i in range(len(state), 44, 7):
             state.append(0.00)
             state.append(1.00)
             state.append(1)
@@ -165,10 +189,86 @@ class AI(torch.nn.Module):
 
     def set_network(self):
         # Layers
-        self.f1 = nn.Linear(42, self.first_layer)
+        self.f1 = nn.Linear(44, self.first_layer)
         self.f2 = nn.Linear(self.first_layer, self.second_layer)
         self.f3 = nn.Linear(self.second_layer, self.third_layer)
         self.f4 = nn.Linear(self.third_layer, 6)
         # load weights
         self.model = self.load_state_dict(torch.load(self.weights_path))
         dprint("Champion's weights loaded")
+
+    def get_transfer_to_border_custom(self, board: Board, player_name, threshold):
+        border_names = [a.get_name() for a in board.get_player_border(player_name)]
+        borders_arrays = [[] for i in range(len(border_names))] # [ [{1}, {2}, {3, 4, 5} ...], [{1}, ...]]
+
+        # all_areas = board.get_player_areas(player_name)
+        # inner = [a for a in all_areas if a.name not in border_names]
+
+        # print(f"Border names: {border_names} len: {len(border_names)}")
+
+        for i, border_name in enumerate(border_names):
+            closed_set = set(border_names)
+            area_ids = []  
+            for j in range(0, 6): 
+                if j == 0:  
+                    area_ids = [border_name]
+                    borders_arrays[i].append({border_name})
+
+                areas_temp = set()
+                for area in area_ids:
+                    closed_set.add(area)
+                    area_obj: Area = board.get_area(area)
+                    adjacent_areas = [ name for name in area_obj.get_adjacent_areas_names() if board.get_area(name).get_owner_name() == player_name and name not in closed_set]
+                    areas_temp.update(adjacent_areas)
+                
+                areas_temp = areas_temp.difference(area_ids)
+                if len(areas_temp) == 0: break
+                
+                area_ids = areas_temp.copy()
+                
+                borders_arrays[i].append(areas_temp.copy())
+        
+        #print("BORDER ARRAYS:")
+        #print(borders_arrays)
+        # max([board.get_area(i).get_dice() for i in board.get_area(list(x[0])[0]).get_adjacent_areas_names() if board.get_area(i).get_owner_name() != player_name]) - board.get_area(list(x[0])[0]).get_dice()
+        
+        borders_arrays.sort(key=lambda x: max([board.get_area(i).get_dice() for i in board.get_area(list(x[0])[0]).get_adjacent_areas_names() if board.get_area(i).get_owner_name() != player_name]) - board.get_area(list(x[0])[0]).get_dice(), reverse=True)
+        
+        # print("BORDERS SORTED:")
+        # print(borders_arrays)
+
+        # iterate over every border
+        for most_endangered_border in borders_arrays:
+            # iterate over each layer between border and connected areas
+            prev_neighs = set()
+            for level, neighs in enumerate(most_endangered_border):
+                # 0 layer = actual border area
+                if level == 0:
+                    prev_neighs = neighs.copy()
+                    continue
+                
+
+                dices = []
+                ids = []
+                # iterate over neighbours
+                for neigh in neighs:
+                    ids.append(neigh)
+                    area = board.get_area(neigh)
+                    dices.append(area.get_dice())
+                
+                # find dice with highest value
+                dices = np.array(dices)
+                max_dice_index = np.argmax(dices)
+                # print(f"Max dice found ({dices[max_dice_index]}) on area {ids[max_dice_index]}")
+
+                if dices[max_dice_index] >= threshold:
+                    # create intersection with selected area and previous layer of areas
+                    new_set = prev_neighs.intersection(board.get_area(ids[max_dice_index]).get_adjacent_areas_names())
+                    target_id = random.choice(list(new_set))
+                    # print(f"Sending {dices[max_dice_index]} from {ids[max_dice_index]} to {target_id}")
+                    return (ids[max_dice_index], target_id)
+
+                prev_neighs = neighs.copy()
+        
+        # print(f"No transfer with threshold {threshold} found.")
+        return None
