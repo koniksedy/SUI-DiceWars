@@ -27,7 +27,7 @@ class AI(torch.nn.Module):
         super().__init__()
         self.player_name = player_name
         self.players_order = players_order
-        self.weights_path = os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/weights/weights-final.h5')
+        self.weights_path = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights-final.h5')
         self.gamma = 0.1     
         self.epsilon = 0
         self.counter_games = 0

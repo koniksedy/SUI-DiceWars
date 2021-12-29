@@ -33,7 +33,7 @@ def define_parameters():
     params['batch_size'] = 300
 
     # Settings
-    params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/weights/weights-final.h5')
+    params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights-final.h5')
     TrainAndNotLoad = True
     params['train'] = TrainAndNotLoad
     params['load_weights'] = not TrainAndNotLoad
@@ -116,7 +116,7 @@ class AI(torch.nn.Module):
 
         if self.params['episodes'] == self.counter_games:
             dprint(f"{Fore.GREEN}Deleting state files... {Style.RESET_ALL}")
-            os.remove(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_STATE.pickle'))
+            os.remove(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'))
             
 
     def ai_turn(self, board: Board, nb_moves_this_turn, nb_transfers_this_turn, nb_turns_this_game, time_left):
@@ -221,7 +221,7 @@ class AI(torch.nn.Module):
             self.counter_games += 1
        
        # Pickle
-        with open(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_STATE.pickle'), 'wb') as config_dictionary_file:
+        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'wb') as config_dictionary_file:
             state = {
                 "epsilon": self.epsilon,
                 "counter_games": self.counter_games,
@@ -233,7 +233,7 @@ class AI(torch.nn.Module):
                 dprint(" --- Saving config error ---")
                 dprint(e)
 
-        with open(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_MEMORY.pickle'), 'wb') as memory_file:
+        with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle'), 'wb') as memory_file:
             try:
                 pickle.dump(self.memory, memory_file)
             except Exception as e:
@@ -243,16 +243,16 @@ class AI(torch.nn.Module):
     def load_ai_state(self):
         config = None
         memory = None
-        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_STATE.pickle')):
-            with open(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_STATE.pickle'), 'rb') as config_dictionary_file:
+        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle')):
+            with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'rb') as config_dictionary_file:
                 try:
                     config = pickle.load(config_dictionary_file)
                 except Exception as e:
                     dprint("--- Config load corrupt ---")
                     dprint(e)
 
-        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_MEMORY.pickle')):
-            with open(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_MEMORY.pickle'), 'rb') as memory_file:
+        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle')):
+            with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle'), 'rb') as memory_file:
                 try:
                     memory = pickle.load(memory_file)
                 except Exception as e:
