@@ -1,57 +1,58 @@
 import random
 import numpy as np
-import pandas as pd
 import collections
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import datetime
 import os
 import pickle
-import json
-from dicewars.ai.kb.move_selection import get_transfer_from_endangered, get_transfer_to_border
+from dicewars.ai.kb.move_selection import get_transfer_from_endangered
 from dicewars.ai.utils import possible_attacks, probability_of_holding_area, probability_of_successful_attack
 from dicewars.client.ai_driver import BattleCommand, EndTurnCommand, TransferCommand
 from dicewars.client.game.area import Area
 from dicewars.client.game.board import Board
 from colorama import Fore, Style
-from dicewars.ai.utils import save_state
 
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEBUG = False
 
 def define_parameters():
     params = dict()
+
     # Neural Network
-    cnt = 200
-    params['epsilon_decay_linear'] = 1/cnt
-    # params['learning_rate'] = 0.00013629
-    params['learning_rate'] = 0.003
-    params['first_layer_size'] = 200        # neurons in the first layer
-    params['second_layer_size'] = 60        # neurons in the second layer
-    params['third_layer_size'] = 30         # neurons in the third layer
+    cnt = 200                                   # num of episodes
+    params['epsilon_decay_linear'] = 1/200
+    params['learning_rate'] = 0.00013629
+    params['first_layer_size'] = 200            # neurons in the first layer
+    params['second_layer_size'] = 60            # neurons in the second layer
+    params['third_layer_size'] = 30             # neurons in the third layer
     params['episodes'] = cnt   
     params['memory_size'] = 2000
     params['batch_size'] = 300
+
     # Settings
-    params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/weights/weights-final.h5')
+    params['weights_path'] = os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/weights/weights-final.h5')
     TrainAndNotLoad = True
     params['train'] = TrainAndNotLoad
     params['load_weights'] = not TrainAndNotLoad
-    params['log_path'] = 'logs/scores_' + str(datetime.datetime.now().strftime("%Y%m%d%H%M%S")) +'.txt'
     return params
 
+# debug dprint
+def dprint(msg):
+    if DEBUG: dprint(msg)
+
 class AI(torch.nn.Module):
+
     def __init__(self, player_name, board, players_order, max_transfers):
         super().__init__()
-        print("\n--------------------------------\nNew AI object was created...\n--------------------------------")
+        dprint("\n--------------------------------\nNew AI object was created...\n--------------------------------")
         self.player_name = player_name
         self.players_order = players_order
         self.params = define_parameters()
         self.reward = 0
         self.gamma = 0.9
-        self.dataframe = pd.DataFrame()
         self.short_memory = np.array([])
         self.learning_rate = self.params['learning_rate']        
         self.epsilon = 1
@@ -86,12 +87,12 @@ class AI(torch.nn.Module):
         self.network()
 
         if self.config:
-            print("Loading state config from previous game")
+            dprint("Loading state config from previous game")
             self.epsilon = self.config['epsilon']
             self.counter_games = self.config['counter_games']
             self.loss_vals = self.config['loss_vals']
             
-            print(
+            dprint(
             f"""
             Previous state loaded, new values:
             Epsilon: {self.epsilon},
@@ -100,22 +101,22 @@ class AI(torch.nn.Module):
             """)
         
         if self.memory_snap:
-            print("Loading memory from previous game")
+            dprint("Loading memory from previous game")
             self.memory = self.memory_snap
         
         if self.params['train']:
-            print("Episodes: {}/{}".format(self.counter_games, self.params['episodes']))
+            dprint("Episodes: {}/{}".format(self.counter_games, self.params['episodes']))
 
     def __del__(self):
-        print("Total turns: {}, Model made {} predictions, {} of them were bad.".format(self.num_of_turns, self.num_of_model_predictions, self.num_of_bad_predictions))
-        print(f"Predicted indexes: {self.final_moves_all}")
+        dprint("Total turns: {}, Model made {} predictions, {} of them were bad.".format(self.num_of_turns, self.num_of_model_predictions, self.num_of_bad_predictions))
+        dprint(f"Predicted indexes: {self.final_moves_all}")
         if self.params['train']:
             model_weights = self.state_dict()
             torch.save(model_weights, self.params["weights_path"])
 
         if self.params['episodes'] == self.counter_games:
-            print(f"{Fore.GREEN}Deleting state files... {Style.RESET_ALL}")
-            os.remove(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'))
+            dprint(f"{Fore.GREEN}Deleting state files... {Style.RESET_ALL}")
+            os.remove(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_STATE.pickle'))
             
 
     def ai_turn(self, board: Board, nb_moves_this_turn, nb_transfers_this_turn, nb_turns_this_game, time_left):
@@ -130,8 +131,6 @@ class AI(torch.nn.Module):
         
         # move dices to borders
         if nb_transfers_this_turn < self.max_transfers:
-            
-            # transfer = get_transfer_to_border(board, self.player_name)
             transfer = self.get_transfer_to_border_custom(board, self.player_name, 4)
             if transfer:
                 return TransferCommand(transfer[0], transfer[1])
@@ -143,8 +142,6 @@ class AI(torch.nn.Module):
                 if transfer:
                     return TransferCommand(transfer[0], transfer[1])
                 else:
-                    # transfer = get_transfer_to_border(board, self.player_name)
-                    
                     # if no evacuation plan is needed, transfer all you can to borders (even areas with 2 can now be transfered from) 
                     transfer = self.get_transfer_to_border_custom(board, self.player_name, 2)
                     if transfer:
@@ -152,7 +149,6 @@ class AI(torch.nn.Module):
 
             self.performed_attacks = 0
             self.save_ai_state()
-            # print(f"Predicted indexes: {self.final_moves_cache}")
             self.final_moves_all.append(self.final_moves_cache.copy())
             self.final_moves_cache.clear()
             return EndTurnCommand()
@@ -161,16 +157,11 @@ class AI(torch.nn.Module):
         if self.num_of_turns == 0 and self.params['train']:
             self.player_areas_old = len(board.get_player_areas(self.player_name))
             if len(self.memory) > 0:
-                self.replay_new(self.memory, self.params['batch_size'])
+                self.replay_memory(self.memory, self.params['batch_size'])
 
         # get results of previous round and train network (if its not the first round)
         if self.num_of_turns != 0 and self.params['train']:
-            self.player_areas_current = len(board.get_player_areas(self.player_name))
-            # reward = self.set_reward(self.player_areas_current, self.player_areas_old)
             reward = self.set_reward(self.state_old, state_new)
-            
-            # print(f"({self.player_areas_old}) --> ({self.player_areas_current})  =  {reward}")
-            
             # train short memory base on the new action and state
             # self.train_short_memory(self.state_old, self.final_move_old, reward, state_new)
             # store the new data into a long term memory
@@ -198,26 +189,9 @@ class AI(torch.nn.Module):
                 self.final_move_old = final_move
                 self.num_of_model_predictions += 1
                 self.final_moves_cache.append(final_move_index)
-                
-                # print("NN Output: {}, attacks len: {}".format(prediction.detach().cpu().numpy()[0], len(attacks)))
-                if len(attacks) <= final_move_index:
-                    
-                    """ 
-                    max_prob = 0
-                    max_prob_index = 0
-                    for i, attack in enumerate(attacks):
-                        prob = probability_of_successful_attack(board, attack[0].get_name(), attack[1].get_name())
-                        if max_prob < prob:
-                            max_prob = prob
-                            max_prob_index = i
-                    
-                    final_move = np.eye(6)[max_prob_index]
-                    self.final_move_old = final_move
-                    final_move_index = max_prob_index
-                    self.bad_prediction = True
-                    self.num_of_bad_predictions += 1
-                    """
 
+                # if model predicted the worst (artificially filled) value, select the worst attack
+                if len(attacks) <= final_move_index:
                     min_prob = 0
                     min_prob_index = 0
                     for i, attack in enumerate(attacks):
@@ -235,16 +209,13 @@ class AI(torch.nn.Module):
 
 
         src_target = attacks[final_move_index]
-        # print("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} {} (index {}, attacks len: {})".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), "[Bad prediction]" if self.bad_prediction else "", final_move_index, len(attacks)))
+        dprint("[{}] Attack: {} ({}) -> {} ({}), prob. of success: {} (index {}, attacks len: {})".format("NN" if NN_predicted else "RD", src_target[0].get_name(), src_target[0].get_dice(), src_target[1].get_name(), src_target[1].get_dice(), probability_of_successful_attack(board, src_target[0].get_name(), src_target[1].get_name()), final_move_index, len(attacks)))
         self.player_areas_old = len(board.get_player_areas(self.player_name))
         self.num_of_turns += 1
         self.performed_attacks += 1
         return BattleCommand(src_target[0].get_name(), src_target[1].get_name())  
     
     def save_ai_state(self):
-        
-        # print(f"Saving state, mem len {len(self.memory)}")
-        # print("AI is being destroyed, saving current model state...")
         if self.fresh_start:
             self.fresh_start = False
             self.counter_games += 1
@@ -259,34 +230,34 @@ class AI(torch.nn.Module):
             try:
                 pickle.dump(state, config_dictionary_file)
             except Exception as e:
-                print(" --- Saving config error ---")
-                print(e)
+                dprint(" --- Saving config error ---")
+                dprint(e)
 
         with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle'), 'wb') as memory_file:
             try:
                 pickle.dump(self.memory, memory_file)
             except Exception as e:
-                print(" --- Saving memory error --- ")
-                print(e)
+                dprint(" --- Saving memory error --- ")
+                dprint(e)
 
     def load_ai_state(self):
         config = None
         memory = None
-        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle')):
-            with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_STATE.pickle'), 'rb') as config_dictionary_file:
+        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_STATE.pickle')):
+            with open(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_STATE.pickle'), 'rb') as config_dictionary_file:
                 try:
                     config = pickle.load(config_dictionary_file)
                 except Exception as e:
-                    print("--- Config load corrupt ---")
-                    print(e)
+                    dprint("--- Config load corrupt ---")
+                    dprint(e)
 
-        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle')):
-            with open(os.path.join(os.getcwd(), 'dicewars/ai/kb/xreinm00/pickles/DQN_MEMORY.pickle'), 'rb') as memory_file:
+        if os.path.exists(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_MEMORY.pickle')):
+            with open(os.path.join(os.getcwd(), 'dicewars/ai/xsedym02/pickles/DQN_MEMORY.pickle'), 'rb') as memory_file:
                 try:
                     memory = pickle.load(memory_file)
                 except Exception as e:
-                    print("--- Memory load corrupt ---")
-                    print(e)
+                    dprint("--- Memory load corrupt ---")
+                    dprint(e)
 
         return config, memory
 
@@ -300,7 +271,7 @@ class AI(torch.nn.Module):
         # weights
         if self.load_weights:
             self.model = self.load_state_dict(torch.load(self.weights))
-            print("Weights were loaded")
+            dprint("Weights were loaded")
 
     def forward(self, x):
         x = F.relu(self.f1(x))
@@ -330,10 +301,11 @@ class AI(torch.nn.Module):
 
         state.append(my_areas_ratio)
         state.append(areas_dices_mean)
-        # print(f"My ratio: {my_areas_ratio}, dices mean: {areas_dices_mean}")
 
         attacks = [a for a in possible_attacks(board, self.player_name) if a[0].get_dice() > (a[1].get_dice() - (0 if moves_this_turn else 1))]
         # attacks_sorted = sorted(attacks, key=lambda x: probability_of_successful_attack(board, x[0].get_name(), x[1].get_name()), reverse=True)
+
+        # shuffle attacks so network can adopt to variety of inputs
         attacks_sorted = attacks
         np.random.shuffle(attacks_sorted)
         if attacks:
@@ -378,23 +350,6 @@ class AI(torch.nn.Module):
 
         return np.asarray(state), attacks_sorted
 
-
-    """
-    def set_reward(self, num_of_areas: int, last_num_of_areas: int):
-        
-        self.reward = 0
-        if self.bad_prediction:
-            self.reward = -5
-        elif num_of_areas < last_num_of_areas:
-            self.reward = -5
-        elif num_of_areas > last_num_of_areas:
-            self.reward = 10
-
-        # print("Reward: {}".format(self.reward))
-        # print("current areas: {}, old areas: {}".format(num_of_areas, last_num_of_areas))
-        return self.reward
-    """
-
     def set_reward(self, state_old, state_new):
         
         area_ratio_old = state_old[0]
@@ -408,27 +363,20 @@ class AI(torch.nn.Module):
         elif area_ration_current > area_ratio_old:
             self.reward = 10
 
-        # print("Reward: {}".format(self.reward))
-        # print("current areas: {}, old areas: {}".format(num_of_areas, last_num_of_areas))
         return self.reward
 
+    #  Store the <state, action, reward, next_state, is_done> tuple in a memory buffer for replay memory. 
     def remember(self, state, action, reward, next_state):
-        """
-        Store the <state, action, reward, next_state, is_done> tuple in a 
-        memory buffer for replay memory.
-        """
         self.memory.append((state, action, reward, next_state))
 
-    def replay_new(self, memory, batch_size):
-        """
-        Replay memory.
-        """
+    # Replay memory and train on it
+    def replay_memory(self, memory, batch_size):
         
         # if mem len is lesser than batch_size, there is no point in learning
         if batch_size > len(memory):
             return
 
-        print("Starting replaying memory, mem len: {}".format(len(memory)))
+        dprint("Starting replaying memory, mem len: {}".format(len(memory)))
         if len(memory) > batch_size:
             minibatch = random.sample(memory, batch_size)
         else:
@@ -438,23 +386,13 @@ class AI(torch.nn.Module):
             self.train()
             torch.set_grad_enabled(True)
             self.optimizer.zero_grad()
-            # target = reward
 
             state_tensor = torch.tensor(np.expand_dims(state, 0), dtype=torch.float32, requires_grad=True).to(DEVICE)
             next_state_tensor = torch.tensor(np.expand_dims(next_state, 0), dtype=torch.float32).to(DEVICE)
             
             q_eval = self.forward(state_tensor)
-            # q_eval = self.forward(state_tensor)[0][np.argmax(action)]
             q_next = self.forward(next_state_tensor)
             q_target = reward + self.gamma * torch.max(q_next[0])
-
-        
-            """
-            loss = F.mse_loss(q_eval, q_target).to(DEVICE)
-            loss.backward()
-            self.optimizer.step()
-            self.epoch_loss.append(loss.item())
-            """
 
             target_f = q_eval.clone()
             target_f[0][np.argmax(action)] = q_target
@@ -465,40 +403,13 @@ class AI(torch.nn.Module):
             self.epoch_loss.append(loss.item())
             self.optimizer.step()    
 
-
-
         self.loss_vals.append(sum(self.epoch_loss)/len(self.epoch_loss))
-        print("Replay finished")       
+        dprint("Replay finished")       
 
-    def train_short_memory(self, state, action, reward, next_state):
-        """
-        Train the DQN agent on the <state, action, reward, next_state, is_done>
-        tuple at the current timestep.
-        """
-        self.train()
-        torch.set_grad_enabled(True)
-        target = reward
-        next_state_tensor = torch.tensor(next_state.reshape((1, 44)), dtype=torch.float32).to(DEVICE)
-        state_tensor = torch.tensor(state.reshape((1, 44)), dtype=torch.float32, requires_grad=True).to(DEVICE)
-        target = reward + self.gamma * torch.max(self.forward(next_state_tensor[0]))
-        output = self.forward(state_tensor)
-        target_f = output.clone()
-        target_f[0][np.argmax(action)] = target
-        target_f.detach()
-        self.optimizer.zero_grad()
-        loss = F.mse_loss(output, target_f)
-        loss.backward()
-        # print("Loss value {}".format(loss.item()))
-        self.optimizer.step()
-
+    # find the most valuable transfer
     def get_transfer_to_border_custom(self, board: Board, player_name, threshold):
         border_names = [a.get_name() for a in board.get_player_border(player_name)]
         borders_arrays = [[] for i in range(len(border_names))] # [ [{1}, {2}, {3, 4, 5} ...], [{1}, ...]]
-
-        # all_areas = board.get_player_areas(player_name)
-        # inner = [a for a in all_areas if a.name not in border_names]
-
-        # print(f"Border names: {border_names} len: {len(border_names)}")
 
         for i, border_name in enumerate(border_names):
             closed_set = set(border_names)
@@ -522,15 +433,8 @@ class AI(torch.nn.Module):
                 
                 borders_arrays[i].append(areas_temp.copy())
         
-        #print("BORDER ARRAYS:")
-        #print(borders_arrays)
-        # max([board.get_area(i).get_dice() for i in board.get_area(list(x[0])[0]).get_adjacent_areas_names() if board.get_area(i).get_owner_name() != player_name]) - board.get_area(list(x[0])[0]).get_dice()
-        
         borders_arrays.sort(key=lambda x: max([board.get_area(i).get_dice() for i in board.get_area(list(x[0])[0]).get_adjacent_areas_names() if board.get_area(i).get_owner_name() != player_name]) - board.get_area(list(x[0])[0]).get_dice(), reverse=True)
         
-        # print("BORDERS SORTED:")
-        # print(borders_arrays)
-
         # iterate over every border
         for most_endangered_border in borders_arrays:
             # iterate over each layer between border and connected areas
@@ -553,27 +457,14 @@ class AI(torch.nn.Module):
                 # find dice with highest value
                 dices = np.array(dices)
                 max_dice_index = np.argmax(dices)
-                # print(f"Max dice found ({dices[max_dice_index]}) on area {ids[max_dice_index]}")
 
                 if dices[max_dice_index] >= threshold:
                     # create intersection with selected area and previous layer of areas
                     new_set = prev_neighs.intersection(board.get_area(ids[max_dice_index]).get_adjacent_areas_names())
                     target_id = random.choice(list(new_set))
-                    # print(f"Sending {dices[max_dice_index]} from {ids[max_dice_index]} to {target_id}")
+                    dprint(f"Sending {dices[max_dice_index]} from {ids[max_dice_index]} to {target_id}")
                     return (ids[max_dice_index], target_id)
 
                 prev_neighs = neighs.copy()
         
-        # print(f"No transfer with threshold {threshold} found.")
         return None
-        """
-        for area in inner:
-            if area.get_dice() < 2:
-                continue
-
-            for neigh in area.get_adjacent_areas_names():
-                if neigh in border_names and board.get_area(neigh).get_dice() < 8:
-                    return area.get_name(), neigh
-
-        return None
-        """
